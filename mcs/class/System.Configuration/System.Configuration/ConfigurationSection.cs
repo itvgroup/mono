@@ -60,7 +60,7 @@ namespace System.Configuration
 		public SectionInformation SectionInformation {
 			get {
 				if (sectionInformation == null)
-					sectionInformation = new SectionInformation ();
+					sectionInformation = new SectionInformation (this);
 				return sectionInformation;
 			}
 		}
@@ -87,29 +87,12 @@ namespace System.Configuration
 				
 				try {
 					// This code requires some re-thinking...
-					XmlReader reader = new ConfigXmlTextReader (
-						new StringReader (RawXml),
-						Configuration.FilePath);
-
-					DoDeserializeSection (reader);
-					
-					if (!String.IsNullOrEmpty (SectionInformation.ConfigSource)) {
-						string fileDir = SectionInformation.ConfigFilePath;
-						if (!String.IsNullOrEmpty (fileDir))
-							fileDir = Path.GetDirectoryName (fileDir);
-						else
-							fileDir = String.Empty;
-					
-						string path = Path.Combine (fileDir, SectionInformation.ConfigSource);
-						if (File.Exists (path)) {
-							RawXml = File.ReadAllText (path);
-							SectionInformation.SetRawXml (RawXml);
-						}
-					}
+					SetRawXmlAndDeserialize (RawXml, Configuration.FilePath);
 				} catch {
 					// ignore, it can fail - we deserialize only in order to get
 					// the configSource attribute
 				}
+
 				XmlDocument doc = new ConfigurationXmlDocument ();
 				doc.LoadXml (RawXml);
 				return SectionHandler.Create (parent, ConfigContext, doc.DocumentElement);
@@ -178,17 +161,23 @@ namespace System.Configuration
 			if (config_source != null)
 				SectionInformation.ConfigSource = config_source;
 			
-			SectionInformation.SetRawXml (RawXml);
 			if (SectionHandler == null)
 				DeserializeElement (reader, false);
 		}
 		
 		[MonoInternalNote ("find the proper location for the decryption stuff")]
-		protected internal virtual void DeserializeSection (XmlReader reader)
+		private void DeserializeSection (XmlReader reader)
 		{
 			try
 			{
 				DoDeserializeSection (reader);
+
+				// Overwrite deserialized section if it has `configSource` attribute:
+				var hasConfigSourceProperty = !String.IsNullOrEmpty (SectionInformation.ConfigSource);
+				if (hasConfigSourceProperty) {
+					var baseDirOfIncludeFile = Path.GetFullPath (Path.GetDirectoryName (SectionInformation.ConfigFilePath ?? string.Empty));
+					DeserializeConfigSource (baseDirOfIncludeFile);
+				}
 			}
 			catch (ConfigurationErrorsException ex)
 			{
@@ -196,7 +185,7 @@ namespace System.Configuration
 			}
 		}
 
-		internal void DeserializeConfigSource (string basePath)
+		private void DeserializeConfigSource (string basePath)
 		{
 			string config_source = SectionInformation.ConfigSource;
 
@@ -211,14 +200,17 @@ namespace System.Configuration
 			
 			string path = Path.Combine (basePath, config_source);
 			if (!File.Exists (path)) {
-				RawXml = null;
-				SectionInformation.SetRawXml (null);
+				SetRawXmlAndDeserialize (null, String.Empty);
 				throw new ConfigurationErrorsException (string.Format ("Unable to open configSource file '{0}'.", path));
 			}
 			
-			RawXml = File.ReadAllText (path);
-			SectionInformation.SetRawXml (RawXml);
-			DeserializeElement (new ConfigXmlTextReader (new StringReader (RawXml), path), false);
+			var rawXml = File.ReadAllText (path);
+			SetRawXmlAndDeserialize (rawXml, path);
+		}
+
+		protected override void DeserializeRawXml (XmlReader rawXmlReader)
+		{
+			DeserializeSection (rawXmlReader);
 		}
 
 		protected internal virtual string SerializeSection (ConfigurationElement parentElement, string name, ConfigurationSaveMode saveMode)
@@ -246,8 +238,9 @@ namespace System.Configuration
 			using (StringWriter sw = new StringWriter ()) {
 				using (XmlTextWriter tw = new XmlTextWriter (sw)) {
 					tw.Formatting = Formatting.Indented;
-					if (hasValues)
+					if (hasValues) {
 						elem.SerializeToXmlElement (tw, name);
+					}
 					else if ((saveMode == ConfigurationSaveMode.Modified) && elem.IsModified ()) {
 						// MS emits an empty section element.
 						tw.WriteStartElement (name);
@@ -260,7 +253,7 @@ namespace System.Configuration
 			}
 			
 			string config_source = SectionInformation.ConfigSource;
-			
+
 			if (String.IsNullOrEmpty (config_source))
 				return ret;
 
